@@ -5,4 +5,4 @@ Offsite fork of dnsmasq. Original can be found at [http://www.thekelleys.org.uk/
 - master is at v2.76
 
 # Addons
-- Added *virtual* dhcp-range - this allows to assign static addresses via *dhcp-host* even if the assigned address is not reachable via dhcp interface
+- Added **virtual** dhcp-range - this allows to assign static addresses via *dhcp-host* even if the assigned address is not reachable via dhcp interface
