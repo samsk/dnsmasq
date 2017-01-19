@@ -526,8 +526,9 @@ static int complete_context(struct in_addr local, int if_index, char *label,
       }
       
       if (context->netmask.s_addr != 0 &&
-	  is_same_net(local, context->start, context->netmask) &&
-	  is_same_net(local, context->end, context->netmask))
+	  ((is_same_net(local, context->start, context->netmask) &&
+	  is_same_net(local, context->end, context->netmask)) ||
+	  context->flags & CONTEXT_VIRTUAL))
 	{
 	  /* link it onto the current chain if we've not seen it before */
 	  if (if_index == param->ind && context->current == context)
