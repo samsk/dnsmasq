@@ -149,7 +149,7 @@ struct dhcp_netid *option_filter(struct dhcp_netid *tags, struct dhcp_netid *con
   for (opt = opts; opt; opt = opt->next)
     if (opt->flags & DHOPT_TAGOK)
       for (tmp = opt->next; tmp; tmp = tmp->next) 
-	if (tmp->opt == opt->opt)
+	if (tmp->opt == opt->opt && tmp->opt != 121)	/* allow multiple static routes */
 	  tmp->flags &= ~DHOPT_TAGOK;
   
   return tagif;

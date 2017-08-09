@@ -2826,6 +2826,8 @@ static int one_opt(int option, char *arg, char *errstr, char *gen_err, int comma
 	      new->flags |= CONTEXT_STATIC;
 	    else if (strcmp(a[1], "proxy") == 0)
 	      new->flags |= CONTEXT_PROXY;
+	    else if (strcmp(a[1], "virtual") == 0)
+	      new->flags |= CONTEXT_STATIC | CONTEXT_VIRTUAL;
 	    else if (!inet_pton(AF_INET, a[1], &new->end))
 	      ret_err(_("bad dhcp-range"));
 	    
