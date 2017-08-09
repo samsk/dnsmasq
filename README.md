@@ -4,7 +4,7 @@ Offsite fork of dnsmasq, for implementing some features I need/use.
 Original can be found at [http://www.thekelleys.org.uk/dnsmasq/doc.html](http://www.thekelleys.org.uk/dnsmasq/doc.html). Official git at  *git://thekelleys.org.uk/dnsmasq.git*.
 
 # Status
-- our master is at v2.76 (*check official git for real HEAD*)
+- our master is at v2.78test2-12-gbc3ef4d (*check official git for real HEAD*)
 
 # Addons
 - Added **virtual** dhcp-range - this allows to assign static addresses via *dhcp-host* even if the assigned address is not reachable via dhcp interface.
