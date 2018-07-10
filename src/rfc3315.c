@@ -1,4 +1,4 @@
-/* dnsmasq is Copyright (c) 2000-2017 Simon Kelley
+/* dnsmasq is Copyright (c) 2000-2018 Simon Kelley
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -206,6 +206,9 @@ static int dhcp6_maybe_relay(struct state *state, void *inbuff, size_t sz,
   /* RFC-6939 */
   if ((opt = opt6_find(opts, end, OPTION6_CLIENT_MAC, 3)))
     {
+      if (opt6_len(opt) - 2 > DHCP_CHADDR_MAX) {
+        return 0;
+      }
       state->mac_type = opt6_uint(opt, 0, 2);
       state->mac_len = opt6_len(opt) - 2;
       memcpy(&state->mac[0], opt6_ptr(opt, 2), state->mac_len);
@@ -213,6 +216,9 @@ static int dhcp6_maybe_relay(struct state *state, void *inbuff, size_t sz,
   
   for (opt = opts; opt; opt = opt6_next(opt, end))
     {
+      if (opt6_ptr(opt, 0) + opt6_len(opt) > end) 
+        return 0;
+     
       int o = new_opt6(opt6_type(opt));
       if (opt6_type(opt) == OPTION6_RELAY_MSG)
 	{
@@ -876,7 +882,7 @@ static int dhcp6_no_relay(struct state *state, int msg_type, void *inbuff, size_
 
 	     if (!ia_option)
 	       {
-		 /* If we get a request with a IA_*A without addresses, treat it exactly like
+		 /* If we get a request with an IA_*A without addresses, treat it exactly like
 		    a SOLICT with rapid commit set. */
 		 save_counter(start);
 		 goto request_no_address; 
@@ -1479,10 +1485,10 @@ static struct dhcp_netid *add_options(struct state *state, int do_refresh)
       if ((p = expand(len + 2)))
 	{
 	  *(p++) = state->fqdn_flags;
-	  p = do_rfc1035_name(p, state->hostname);
+	  p = do_rfc1035_name(p, state->hostname, NULL);
 	  if (state->send_domain)
 	    {
-	      p = do_rfc1035_name(p, state->send_domain);
+	      p = do_rfc1035_name(p, state->send_domain, NULL);
 	      *p = 0;
 	    }
 	}
@@ -1619,7 +1625,7 @@ static void end_ia(int t1cntr, unsigned int min_time, int do_fuzz)
 {
   if (t1cntr != 0)
     {
-      /* go back an fill in fields in IA_NA option */
+      /* go back and fill in fields in IA_NA option */
       int sav = save_counter(t1cntr);
       unsigned int t1, t2, fuzz = 0;
 
