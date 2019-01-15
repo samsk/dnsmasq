@@ -232,7 +232,7 @@ void dhcp_packet(time_t now, int pxe_fd)
   
 #ifdef HAVE_LINUX_NETWORK
   /* ARP fiddling uses original interface even if we pretend to use a different one. */
-  strncpy(arp_req.arp_dev, ifr.ifr_name, 16);
+  safe_strncpy(arp_req.arp_dev, ifr.ifr_name, sizeof(arp_req.arp_dev));
 #endif 
 
   /* If the interface on which the DHCP request was received is an
@@ -255,7 +255,7 @@ void dhcp_packet(time_t now, int pxe_fd)
 	      }
 	    else 
 	      {
-		strncpy(ifr.ifr_name,  bridge->iface, IF_NAMESIZE);
+		safe_strncpy(ifr.ifr_name,  bridge->iface, sizeof(ifr.ifr_name));
 		break;
 	      }
 	  }
@@ -279,7 +279,7 @@ void dhcp_packet(time_t now, int pxe_fd)
       is_relay_reply = 1; 
       iov.iov_len = sz;
 #ifdef HAVE_LINUX_NETWORK
-      strncpy(arp_req.arp_dev, ifr.ifr_name, 16);
+      safe_strncpy(arp_req.arp_dev, ifr.ifr_name, sizeof(arp_req.arp_dev));
 #endif 
     }
   else
@@ -310,7 +310,7 @@ void dhcp_packet(time_t now, int pxe_fd)
       parm.relay_local.s_addr = 0;
       parm.ind = iface_index;
       
-      if (!iface_check(AF_INET, (struct all_addr *)&iface_addr, ifr.ifr_name, NULL))
+      if (!iface_check(AF_INET, (union all_addr *)&iface_addr, ifr.ifr_name, NULL))
 	{
 	  /* If we failed to match the primary address of the interface, see if we've got a --listen-address
 	     for a secondary */
@@ -559,7 +559,7 @@ static int complete_context(struct in_addr local, int if_index, char *label,
     }
 
   for (relay = daemon->relay4; relay; relay = relay->next)
-    if (if_index == param->ind && relay->local.addr.addr4.s_addr == local.s_addr && relay->current == relay &&
+    if (if_index == param->ind && relay->local.addr4.s_addr == local.s_addr && relay->current == relay &&
 	(param->relay_local.s_addr == 0 || param->relay_local.s_addr == local.s_addr))
       {
 	relay->current = param->relay;
@@ -766,24 +766,33 @@ int address_allocate(struct dhcp_context *context,
 		(!IN_CLASSC(ntohl(addr.s_addr)) || 
 		 ((ntohl(addr.s_addr) & 0xff) != 0xff && ((ntohl(addr.s_addr) & 0xff) != 0x0))))
 	      {
-		struct ping_result *r;
-		
-		if ((r = do_icmp_ping(now, addr, j, loopback)))
- 		  {
-		    /* consec-ip mode: we offered this address for another client
-		       (different hash) recently, don't offer it to this one. */
-		    if (!option_bool(OPT_CONSEC_ADDR) || r->hash == j)
-		      {
-			*addrp = addr;
-			return 1;
-		      }
-		  }
+		/* in consec-ip mode, skip addresses equal to
+		   the number of addresses rejected by clients. This
+		   should avoid the same client being offered the same
+		   address after it has rjected it. */
+		if (option_bool(OPT_CONSEC_ADDR) && c->addr_epoch)
+		  c->addr_epoch--;
 		else
 		  {
-		    /* address in use: perturb address selection so that we are
-		       less likely to try this address again. */
-		    if (!option_bool(OPT_CONSEC_ADDR))
-		      c->addr_epoch++;
+		    struct ping_result *r;
+		    
+		    if ((r = do_icmp_ping(now, addr, j, loopback)))
+		      {
+			/* consec-ip mode: we offered this address for another client
+			   (different hash) recently, don't offer it to this one. */
+			if (!option_bool(OPT_CONSEC_ADDR) || r->hash == j)
+			  {
+			    *addrp = addr;
+			    return 1;
+			  }
+		      }
+		    else
+		      {
+			/* address in use: perturb address selection so that we are
+			   less likely to try this address again. */
+			if (!option_bool(OPT_CONSEC_ADDR))
+			  c->addr_epoch++;
+		      }
 		  }
 	      }
 	    
@@ -972,7 +981,7 @@ char *host_from_dns(struct in_addr addr)
   if (daemon->port == 0)
     return NULL; /* DNS disabled. */
   
-  lookup = cache_find_by_addr(NULL, (struct all_addr *)&addr, 0, F_IPV4);
+  lookup = cache_find_by_addr(NULL, (union all_addr *)&addr, 0, F_IPV4);
 
   if (lookup && (lookup->flags & F_HOSTS))
     {
@@ -989,8 +998,7 @@ char *host_from_dns(struct in_addr addr)
       if (!legal_hostname(hostname))
 	return NULL;
       
-      strncpy(daemon->dhcp_buff, hostname, 256);
-      daemon->dhcp_buff[255] = 0;
+      safe_strncpy(daemon->dhcp_buff, hostname, 256);
       strip_hostname(daemon->dhcp_buff);
 
       return daemon->dhcp_buff;
@@ -1002,25 +1010,25 @@ char *host_from_dns(struct in_addr addr)
 static int  relay_upstream4(struct dhcp_relay *relay, struct dhcp_packet *mess, size_t sz, int iface_index)
 {
   /* ->local is same value for all relays on ->current chain */
-  struct all_addr from;
+  union all_addr from;
   
   if (mess->op != BOOTREQUEST)
     return 0;
 
   /* source address == relay address */
-  from.addr.addr4 = relay->local.addr.addr4;
+  from.addr4 = relay->local.addr4;
   
   /* already gatewayed ? */
   if (mess->giaddr.s_addr)
     {
       /* if so check if by us, to stomp on loops. */
-      if (mess->giaddr.s_addr == relay->local.addr.addr4.s_addr)
+      if (mess->giaddr.s_addr == relay->local.addr4.s_addr)
 	return 1;
     }
   else
     {
       /* plug in our address */
-      mess->giaddr.s_addr = relay->local.addr.addr4.s_addr;
+      mess->giaddr.s_addr = relay->local.addr4.s_addr;
     }
 
   if ((mess->hops++) > 20)
@@ -1031,7 +1039,7 @@ static int  relay_upstream4(struct dhcp_relay *relay, struct dhcp_packet *mess, 
       union mysockaddr to;
       
       to.sa.sa_family = AF_INET;
-      to.in.sin_addr = relay->server.addr.addr4;
+      to.in.sin_addr = relay->server.addr4;
       to.in.sin_port = htons(daemon->dhcp_server_port);
       
       send_from(daemon->dhcpfd, 0, (char *)mess, sz, &to, &from, 0);
@@ -1039,7 +1047,7 @@ static int  relay_upstream4(struct dhcp_relay *relay, struct dhcp_packet *mess, 
       if (option_bool(OPT_LOG_OPTS))
 	{
 	  inet_ntop(AF_INET, &relay->local, daemon->addrbuff, ADDRSTRLEN);
-	  my_syslog(MS_DHCP | LOG_INFO, _("DHCP relay %s -> %s"), daemon->addrbuff, inet_ntoa(relay->server.addr.addr4));
+	  my_syslog(MS_DHCP | LOG_INFO, _("DHCP relay %s -> %s"), daemon->addrbuff, inet_ntoa(relay->server.addr4));
 	}
       
       /* Save this for replies */
@@ -1059,7 +1067,7 @@ static struct dhcp_relay *relay_reply4(struct dhcp_packet *mess, char *arrival_i
 
   for (relay = daemon->relay4; relay; relay = relay->next)
     {
-      if (mess->giaddr.s_addr == relay->local.addr.addr4.s_addr)
+      if (mess->giaddr.s_addr == relay->local.addr4.s_addr)
 	{
 	  if (!relay->interface || wildcard_match(relay->interface, arrival_interface))
 	    return relay->iface_index != 0 ? relay : NULL;

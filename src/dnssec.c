@@ -655,7 +655,7 @@ int dnssec_validate_by_ds(time_t now, struct dns_header *header, size_t plen, ch
   struct crec *crecp, *recp1;
   int rc, j, qtype, qclass, ttl, rdlen, flags, algo, valid, keytag;
   struct blockdata *key;
-  struct all_addr a;
+  union all_addr a;
 
   if (ntohs(header->qdcount) != 1 ||
       !extract_name(header, plen, &p, name, 1, 4))
@@ -747,7 +747,7 @@ int dnssec_validate_by_ds(time_t now, struct dns_header *header, size_t plen, ch
 	      
 	      if (!(recp1->flags & F_NEG) &&
 		  recp1->addr.ds.keylen == (int)hash->digest_size &&
-		  (ds_digest = blockdata_retrieve(recp1->addr.key.keydata, recp1->addr.ds.keylen, NULL)) &&
+		  (ds_digest = blockdata_retrieve(recp1->addr.ds.keydata, recp1->addr.ds.keylen, NULL)) &&
 		  memcmp(ds_digest, digest, recp1->addr.ds.keylen) == 0 &&
 		  explore_rrset(header, plen, class, T_DNSKEY, name, keyname, &sigcnt, &rrcnt) &&
 		  sigcnt != 0 && rrcnt != 0 &&
@@ -798,30 +798,27 @@ int dnssec_validate_by_ds(time_t now, struct dns_header *header, size_t plen, ch
 		  algo = *p++;
 		  keytag = dnskey_keytag(algo, flags, p, rdlen - 4);
 		  
-		  /* Cache needs to known class for DNSSEC stuff */
-		  a.addr.dnssec.class = class;
-		  
 		  if ((key = blockdata_alloc((char*)p, rdlen - 4)))
 		    {
-		      if (!(recp1 = cache_insert(name, &a, now, ttl, F_FORWARD | F_DNSKEY | F_DNSSECOK)))
+		      a.key.keylen = rdlen - 4;
+		      a.key.keydata = key;
+		      a.key.algo = algo;
+		      a.key.keytag = keytag;
+		      a.key.flags = flags;
+		      
+		      if (!cache_insert(name, &a, class, now, ttl, F_FORWARD | F_DNSKEY | F_DNSSECOK))
 			{
 			  blockdata_free(key);
 			  return STAT_BOGUS;
 			}
 		      else
 			{
-			  a.addr.log.keytag = keytag;
-			  a.addr.log.algo = algo;
+			  a.log.keytag = keytag;
+			  a.log.algo = algo;
 			  if (algo_digest_name(algo))
 			    log_query(F_NOEXTRA | F_KEYTAG | F_UPSTREAM, name, &a, "DNSKEY keytag %hu, algo %hu");
 			  else
 			    log_query(F_NOEXTRA | F_KEYTAG | F_UPSTREAM, name, &a, "DNSKEY keytag %hu, algo %hu (not supported)");
-			  
-			  recp1->addr.key.keylen = rdlen - 4;
-			  recp1->addr.key.keydata = key;
-			  recp1->addr.key.algo = algo;
-			  recp1->addr.key.keytag = keytag;
-			  recp1->addr.key.flags = flags;
 			}
 		    }
 		}
@@ -860,7 +857,7 @@ int dnssec_validate_ds(time_t now, struct dns_header *header, size_t plen, char 
   int qtype, qclass, rc, i, neganswer, nons;
   int aclass, atype, rdlen;
   unsigned long ttl;
-  struct all_addr a;
+  union all_addr a;
 
   if (ntohs(header->qdcount) != 1 ||
       !(p = skip_name(p, header, plen, 4)))
@@ -918,8 +915,7 @@ int dnssec_validate_ds(time_t now, struct dns_header *header, size_t plen, char 
 	      int algo, digest, keytag;
 	      unsigned char *psave = p;
 	      struct blockdata *key;
-	      struct crec *crecp;
-
+	   
 	      if (rdlen < 4)
 		return STAT_BOGUS; /* bad packet */
 	      
@@ -927,31 +923,28 @@ int dnssec_validate_ds(time_t now, struct dns_header *header, size_t plen, char 
 	      algo = *p++;
 	      digest = *p++;
 	      
-	      /* Cache needs to known class for DNSSEC stuff */
-	      a.addr.dnssec.class = class;
-	      
 	      if ((key = blockdata_alloc((char*)p, rdlen - 4)))
 		{
-		  if (!(crecp = cache_insert(name, &a, now, ttl, F_FORWARD | F_DS | F_DNSSECOK)))
+		  a.ds.digest = digest;
+		  a.ds.keydata = key;
+		  a.ds.algo = algo;
+		  a.ds.keytag = keytag;
+		  a.ds.keylen = rdlen - 4;
+
+		  if (!cache_insert(name, &a, class, now, ttl, F_FORWARD | F_DS | F_DNSSECOK))
 		    {
 		      blockdata_free(key);
 		      return STAT_BOGUS;
 		    }
 		  else
 		    {
-		      a.addr.log.keytag = keytag;
-		      a.addr.log.algo = algo;
-		      a.addr.log.digest = digest;
+		      a.log.keytag = keytag;
+		      a.log.algo = algo;
+		      a.log.digest = digest;
 		      if (ds_digest_name(digest) && algo_digest_name(algo))
 			log_query(F_NOEXTRA | F_KEYTAG | F_UPSTREAM, name, &a, "DS keytag %hu, algo %hu, digest %hu");
 		      else
 			log_query(F_NOEXTRA | F_KEYTAG | F_UPSTREAM, name, &a, "DS keytag %hu, algo %hu, digest %hu (not supported)");
-		      
-		      crecp->addr.ds.digest = digest;
-		      crecp->addr.ds.keydata = key;
-		      crecp->addr.ds.algo = algo;
-		      crecp->addr.ds.keytag = keytag;
-		      crecp->addr.ds.keylen = rdlen - 4; 
 		    } 
 		}
 	      
@@ -1021,8 +1014,7 @@ int dnssec_validate_ds(time_t now, struct dns_header *header, size_t plen, char 
 	{
 	  cache_start_insert();
 	  
-	  a.addr.dnssec.class = class;
-	  if (!cache_insert(name, &a, now, ttl, flags))
+	  if (!cache_insert(name, NULL, class, now, ttl, flags))
 	    return STAT_BOGUS;
 	  
 	  cache_end_insert();  
@@ -1761,7 +1753,7 @@ int dnssec_validate_reply(time_t now, struct dns_header *header, size_t plen, ch
 
   unsigned char *ans_start, *p1, *p2;
   int type1, class1, rdlen1 = 0, type2, class2, rdlen2, qclass, qtype, targetidx;
-  int i, j, rc;
+  int i, j, rc = STAT_INSECURE;
   int secure = STAT_SECURE;
 
   /* extend rr_status if necessary */
@@ -1835,10 +1827,10 @@ int dnssec_validate_reply(time_t now, struct dns_header *header, size_t plen, ch
   
   for (p1 = ans_start, i = 0; i < ntohs(header->ancount) + ntohs(header->nscount); i++)
     {
-       if (i != 0 && !ADD_RDLEN(header, p1, plen, rdlen1))
-	 return STAT_BOGUS;
-
-       if (!extract_name(header, plen, &p1, name, 1, 10))
+      if (i != 0 && !ADD_RDLEN(header, p1, plen, rdlen1))
+	return STAT_BOGUS;
+      
+      if (!extract_name(header, plen, &p1, name, 1, 10))
 	return STAT_BOGUS; /* bad packet */
       
       GETSHORT(type1, p1);
@@ -2026,19 +2018,11 @@ int dnskey_keytag(int alg, int flags, unsigned char *key, int keylen)
 }
 
 size_t dnssec_generate_query(struct dns_header *header, unsigned char *end, char *name, int class, 
-			     int type, union mysockaddr *addr, int edns_pktsz)
+			     int type, int edns_pktsz)
 {
   unsigned char *p;
-  char *types = querystr("dnssec-query", type);
   size_t ret;
 
-  if (addr->sa.sa_family == AF_INET) 
-    log_query(F_NOEXTRA | F_DNSSEC | F_IPV4, name, (struct all_addr *)&addr->in.sin_addr, types);
-#ifdef HAVE_IPV6
-  else
-    log_query(F_NOEXTRA | F_DNSSEC | F_IPV6, name, (struct all_addr *)&addr->in6.sin6_addr, types);
-#endif
-  
   header->qdcount = htons(1);
   header->ancount = htons(0);
   header->nscount = htons(0);

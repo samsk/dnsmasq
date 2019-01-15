@@ -216,7 +216,7 @@ int main (int argc, char **argv)
 #endif
 
 #ifndef HAVE_AUTH
-  if (daemon->authserver)
+  if (daemon->auth_zones)
     die(_("authoritative DNS not available: set HAVE_AUTH in src/config.h"), NULL, EC_BADCONF);
 #endif
 
@@ -225,18 +225,30 @@ int main (int argc, char **argv)
     die(_("loop detection not available: set HAVE_LOOP in src/config.h"), NULL, EC_BADCONF);
 #endif
 
+#ifndef HAVE_UBUS
+  if (option_bool(OPT_UBUS))
+    die(_("Ubus not available: set HAVE_UBUS in src/config.h"), NULL, EC_BADCONF);
+#endif
+  
   if (daemon->max_port < daemon->min_port)
     die(_("max_port cannot be smaller than min_port"), NULL, EC_BADCONF);
 
   now = dnsmasq_time();
 
-  /* Create a serial at startup if not configured. */
-  if (daemon->authinterface && daemon->soa_sn == 0)
+  if (daemon->auth_zones)
+    {
+      if (!daemon->authserver)
+	die(_("--auth-server required when an auth zone is defined."), NULL, EC_BADCONF);
+
+      /* Create a serial at startup if not configured. */
 #ifdef HAVE_BROKEN_RTC
-    die(_("zone serial must be configured in --auth-soa"), NULL, EC_BADCONF);
+      if (daemon->soa_sn == 0)
+	die(_("zone serial must be configured in --auth-soa"), NULL, EC_BADCONF);
 #else
-  daemon->soa_sn = now;
+      if (daemon->soa_sn == 0)
+	daemon->soa_sn = now;
 #endif
+    }
   
 #ifdef HAVE_DHCP6
   if (daemon->dhcp6)
@@ -354,9 +366,7 @@ int main (int argc, char **argv)
     {
       cache_init();
 
-#ifdef HAVE_DNSSEC
       blockdata_init();
-#endif
     }
 
 #ifdef HAVE_INOTIFY
@@ -473,7 +483,6 @@ int main (int argc, char **argv)
       if (chdir("/") != 0)
 	die(_("cannot chdir to filesystem root: %s"), NULL, EC_MISC); 
 
-#ifndef NO_FORK      
       if (!option_bool(OPT_NO_FORK))
 	{
 	  pid_t pid;
@@ -513,7 +522,6 @@ int main (int argc, char **argv)
 	  if (pid != 0)
 	    _exit(0);
 	}
-#endif
             
       /* write pidfile _after_ forking ! */
       if (daemon->runfile)
@@ -771,7 +779,8 @@ int main (int argc, char **argv)
   if (option_bool(OPT_DNSSEC_VALID))
     {
       int rc;
-
+      struct ds_config *ds;
+      
       /* Delay creating the timestamp file until here, after we've changed user, so that
 	 it has the correct owner to allow updating the mtime later. 
 	 This means we have to report fatal errors via the pipe. */
@@ -792,6 +801,10 @@ int main (int argc, char **argv)
       
       if (rc == 1)
 	my_syslog(LOG_INFO, _("DNSSEC signature timestamps not checked until system time valid"));
+
+      for (ds = daemon->ds; ds; ds = ds->next)
+	my_syslog(LOG_INFO, _("configured with trust anchor for %s keytag %u"),
+		  ds->name[0] == 0 ? "<root>" : ds->name, ds->keytag);
     }
 #endif
 
@@ -913,6 +926,10 @@ int main (int argc, char **argv)
     check_servers();
   
   pid = getpid();
+
+  daemon->pipe_to_parent = -1;
+  for (i = 0; i < MAX_PROCS; i++)
+    daemon->tcp_pipes[i] = -1;
   
 #ifdef HAVE_INOTIFY
   /* Using inotify, have to select a resolv file at startup */
@@ -942,8 +959,13 @@ int main (int argc, char **argv)
 
 #ifdef HAVE_DBUS
       set_dbus_listeners();
-#endif	
-  
+#endif
+
+#ifdef HAVE_UBUS
+      if (option_bool(OPT_UBUS))
+	  set_ubus_listeners();
+#endif
+	  
 #ifdef HAVE_DHCP
       if (daemon->dhcp || daemon->relay4)
 	{
@@ -1073,7 +1095,12 @@ int main (int argc, char **argv)
 	}
       check_dbus_listeners();
 #endif
-      
+
+#ifdef HAVE_UBUS
+      if (option_bool(OPT_UBUS))
+        check_ubus_listeners();
+#endif
+
       check_dns_listeners(now);
 
 #ifdef HAVE_TFTP
@@ -1584,7 +1611,7 @@ static int set_dns_listeners(time_t now)
 	 we don't need to explicitly arrange to wake up here */
       if  (listener->tcpfd != -1)
 	for (i = 0; i < MAX_PROCS; i++)
-	  if (daemon->tcp_pids[i] == 0)
+	  if (daemon->tcp_pids[i] == 0 && daemon->tcp_pipes[i] == -1)
 	    {
 	      poll_listen(listener->tcpfd, POLLIN);
 	      break;
@@ -1597,6 +1624,11 @@ static int set_dns_listeners(time_t now)
 
     }
   
+  if (!option_bool(OPT_DEBUG))
+    for (i = 0; i < MAX_PROCS; i++)
+      if (daemon->tcp_pipes[i] != -1)
+	poll_listen(daemon->tcp_pipes[i], POLLIN);
+  
   return wait;
 }
 
@@ -1605,7 +1637,8 @@ static void check_dns_listeners(time_t now)
   struct serverfd *serverfdp;
   struct listener *listener;
   int i;
-
+  int pipefd[2];
+  
   for (serverfdp = daemon->sfds; serverfdp; serverfdp = serverfdp->next)
     if (poll_check(serverfdp->fd, POLLIN))
       reply_query(serverfdp->fd, serverfdp->source_addr.sa.sa_family, now);
@@ -1615,7 +1648,24 @@ static void check_dns_listeners(time_t now)
       if (daemon->randomsocks[i].refcount != 0 && 
 	  poll_check(daemon->randomsocks[i].fd, POLLIN))
 	reply_query(daemon->randomsocks[i].fd, daemon->randomsocks[i].family, now);
-  
+
+  /* Races. The child process can die before we read all of the data from the
+     pipe, or vice versa. Therefore send tcp_pids to zero when we wait() the 
+     process, and tcp_pipes to -1 and close the FD when we read the last
+     of the data - indicated by cache_recv_insert returning zero.
+     The order of these events is indeterminate, and both are needed
+     to free the process slot. Once the child process has gone, poll()
+     returns POLLHUP, not POLLIN, so have to check for both here. */
+  if (!option_bool(OPT_DEBUG))
+    for (i = 0; i < MAX_PROCS; i++)
+      if (daemon->tcp_pipes[i] != -1 &&
+	  poll_check(daemon->tcp_pipes[i], POLLIN | POLLHUP) &&
+	  !cache_recv_insert(now, daemon->tcp_pipes[i]))
+	{
+	  close(daemon->tcp_pipes[i]);
+	  daemon->tcp_pipes[i] = -1;	
+	}
+	
   for (listener = daemon->listeners; listener; listener = listener->next)
     {
       if (listener->fd != -1 && poll_check(listener->fd, POLLIN))
@@ -1669,12 +1719,12 @@ static void check_dns_listeners(time_t now)
 	      if ((if_index = tcp_interface(confd, tcp_addr.sa.sa_family)) != 0 &&
 		  indextoname(listener->tcpfd, if_index, intr_name))
 		{
-		  struct all_addr addr;
-		  addr.addr.addr4 = tcp_addr.in.sin_addr;
-#ifdef HAVE_IPV6
+		  union all_addr addr;
+		  
 		  if (tcp_addr.sa.sa_family == AF_INET6)
-		    addr.addr.addr6 = tcp_addr.in6.sin6_addr;
-#endif
+		    addr.addr6 = tcp_addr.in6.sin6_addr;
+		  else
+		    addr.addr4 = tcp_addr.in.sin_addr;
 		  
 		  for (iface = daemon->interfaces; iface; iface = iface->next)
 		    if (iface->index == if_index)
@@ -1708,16 +1758,20 @@ static void check_dns_listeners(time_t now)
 	      shutdown(confd, SHUT_RDWR);
 	      while (retry_send(close(confd)));
 	    }
-#ifndef NO_FORK
-	  else if (!option_bool(OPT_DEBUG) && (p = fork()) != 0)
+	  else if (!option_bool(OPT_DEBUG) && pipe(pipefd) == 0 && (p = fork()) != 0)
 	    {
-	      if (p != -1)
+	      close(pipefd[1]); /* parent needs read pipe end. */
+	      if (p == -1)
+		close(pipefd[0]);
+	      else
 		{
 		  int i;
+
 		  for (i = 0; i < MAX_PROCS; i++)
-		    if (daemon->tcp_pids[i] == 0)
+		    if (daemon->tcp_pids[i] == 0 && daemon->tcp_pipes[i] == -1)
 		      {
 			daemon->tcp_pids[i] = p;
+			daemon->tcp_pipes[i] = pipefd[0];
 			break;
 		      }
 		}
@@ -1726,7 +1780,6 @@ static void check_dns_listeners(time_t now)
 	      /* The child can use up to TCP_MAX_QUERIES ids, so skip that many. */
 	      daemon->log_id += TCP_MAX_QUERIES;
 	    }
-#endif
 	  else
 	    {
 	      unsigned char *buff;
@@ -1734,7 +1787,7 @@ static void check_dns_listeners(time_t now)
 	      int flags;
 	      struct in_addr netmask;
 	      int auth_dns;
-
+	   
 	      if (iface)
 		{
 		  netmask = iface->netmask;
@@ -1746,12 +1799,14 @@ static void check_dns_listeners(time_t now)
 		  auth_dns = 0;
 		}
 
-#ifndef NO_FORK
 	      /* Arrange for SIGALRM after CHILD_LIFETIME seconds to
 		 terminate the process. */
 	      if (!option_bool(OPT_DEBUG))
-		alarm(CHILD_LIFETIME);
-#endif
+		{
+		  alarm(CHILD_LIFETIME);
+		  close(pipefd[0]); /* close read end in child. */
+		  daemon->pipe_to_parent = pipefd[1];
+		}
 
 	      /* start with no upstream connections. */
 	      for (s = daemon->servers; s; s = s->next)
@@ -1777,13 +1832,11 @@ static void check_dns_listeners(time_t now)
 		    shutdown(s->tcpfd, SHUT_RDWR);
 		    while (retry_send(close(s->tcpfd)));
 		  }
-#ifndef NO_FORK		   
 	      if (!option_bool(OPT_DEBUG))
 		{
 		  flush_log();
 		  _exit(0);
 		}
-#endif
 	    }
 	}
     }
